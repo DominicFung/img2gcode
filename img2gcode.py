@@ -19,7 +19,8 @@ from gray2gcode import gray2gcode
 @click.option("--colours", default=4, help="number of colours (yarn) ")
 @click.option("--width", default=4000, help="maximum bed width (x)")
 @click.option("--height", default=4000, help="maximum bed height (y)")
-@click.option("--depth", default=-1000, help="maximum depth (z)")
+@click.option("--depth", default=4.5, help="maximum depth (z)")
+@click.option("--spacing", default=0.25, help="space between tufting lines (inches)")
 @click.option("--seed", default=0, help="random seed")
 def run(
     folder,
@@ -28,6 +29,7 @@ def run(
     width,
     height,
     depth,
+    spacing,
     seed,
 ):
     random.seed(seed)
@@ -74,16 +76,15 @@ def run(
         subprocess.run(cmd.split())
 
         fname = f"{os. getcwd()}/c-{img_number}.png"
-        outputfile = gray2gcode(fname)
+        outputfile = gray2gcode(fname, depth, spacing)
 
-        log.info(f"gcode: /nc_output/${outputfile}")
+        log.info(f"gcode: /nc_output/{outputfile}")
         img_number+=1
 
     plt.hist(gray.ravel(),256,[0,256])
     plt.savefig('plt')
 
     log.debug("done.")
-    # cmd = f"{imconvert} {file} -resize {width}x{height} -background White -gravity center -extent {width}x{height} -threshold {threshold}%% -rotate 90 thresholded.png"
 
 if __name__ == "__main__":
     run()

@@ -1,594 +1,504 @@
-# from xml.dom import minidom
-
-# doc = minidom.parse("test.svg")  # parseString also exists
-# path_strings = [path.getAttribute('d') for path
-#                 in doc.getElementsByTagName('path')]
-# doc.unlink()
-
-# path_string = " ".join(path_strings)
-
-# print(path_string)
-# import matplotlib.pyplot as plt
-# import matplotlib.lines as mlines
-# import matplotlib.colors as mcolors
-# from matplotlib.animation import FuncAnimation
-
-from svgpathtools import svg2paths2, wsvg, Line, Path
-from svg.path import parse_path
 import numpy as np
-from tqdm import tqdm
-from simplification.cutil import (
-    simplify_coords,
-    simplify_coords_idx,
-    simplify_coords_vw,
-    simplify_coords_vw_idx,
-    simplify_coords_vwp,
-)
-from loguru import logger as log
-from PIL import Image, ImageDraw
+from math import *
+import operator
 
-import math
-import random
-from shutil import copyfile
+prn_detail = 0
+epsilon = 1e-5
 
-def dist2(p1, p2):
-    return (p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2
+def cmp(a, b):
+    return (a > b) - (a < b) 
 
-def fuse(points, d):
-    ret = []
-    d2 = d * d
-    n = len(points)
-    taken = [False] * n
-    for i in range(n):
-        if not taken[i]:
-            count = 1
-            point = [points[i][0], points[i][1]]
-            taken[i] = True
-            for j in range(i + 1, n):
-                if dist2(points[i], points[j]) < d2:
-                    point[0] += points[j][0]
-                    point[1] += points[j][1]
-                    count += 1
-                    taken[j] = True
-            point[0] /= count
-            point[1] /= count
-            ret.append((point[0], point[1]))
-    return ret
+def ball_tool(r,rad):
+    if r == rad: return rad
+    #s = -sqrt(rad**2-r**2)
+    s = rad-sqrt(rad**2-r**2)
+    return s
 
+def endmill(r,dia):
+    return 0
 
-def fuse_linear(points, d):
-    ret = []
-    deleted = {}
-    for _, p1 in enumerate(points):
-        has_close_point = False
-        for j, p2 in enumerate(ret):
-            if dist2(p1, p2) < d:
-                has_close_point = True
-                break
-        if not has_close_point:
-            ret.append(p1)
-    return ret
+def vee_common(angle):
+    #slope = tan(angle * pi / 180)
+    slope = tan(radians((180-angle)/2) )
+    def f(r, dia):
+        return r * slope
+    return f
 
+try:
+    import numpy as numarray
+    import numpy.core
+    olderr = numpy.core.seterr(divide='ignore')
+    plus_inf = (np.array((1.,))/0.)[0]
+    numpy.core.seterr(**olderr)
+except ImportError:
+    importingError = True
 
-def cubic_bezier_sample(start, control1, control2, end):
-    inputs = np.array([start, control1, control2, end])
-    cubic_bezier_matrix = np.array(
-        [[-1, 3, -3, 1], [3, -6, 3, 0], [-3, 3, 0, 0], [1, 0, 0, 0]]
-    )
-    partial = cubic_bezier_matrix.dot(inputs)
+def circ(r,b): 
+    """\
+Calculate the portion of the arc to do so that none is above the
+safety height (that's just silly)"""
 
-    return lambda t: np.array([t ** 3, t ** 2, t, 1]).dot(partial)
+    z = r**2 - (r-b)**2
+    if z < 0: z = 0
+    return z**.5
 
+class ArcEntryCut:
+    def __init__(self, feed, max_radius):
+        self.feed = feed
+        self.max_radius = max_radius
 
-def write_paths_to_gcode(fname, paths):
-    gcodestring = "G01 Z1000"
-    for i, path in enumerate(paths):
-        coords = []
-        for j, ele in enumerate(path):
-            x1 = np.real(ele.start)
-            y1 = np.imag(ele.start)
-            x2 = np.real(ele.end)
-            y2 = np.imag(ele.end)
-            if j == 0:
-                gcodestring += f"\nG01 X{int(x1)} Y{int(y1)} Z1000"
-                gcodestring += f"\nG01 Z0"
-            else:
-                gcodestring += f"\nG01 X{int(x1)} Y{int(y1)} Z0"
-            if j == len(path) - 1:
-                gcodestring += f"\nG01 X{int(x1)} Y{int(y1)} Z1000"
+    def __call__(self, conv, i0, j0, points):
+        if len(points) < 2:
+            p = points[0][1]
+            if self.feed:
+                conv.g.set_feed(self.feed)
+            conv.g.safety()
+            conv.g.rapid(p[0], p[1])
+            if self.feed:
+                conv.g.set_feed(conv.feed)
+            return
 
-        gcodestring += "\nG01 Z1000"
-    with open(fname, "w") as f:
-        f.write(gcodestring.strip())
+        p1 = points[0][1]
+        p2 = points[1][1]
+        z0 = p1[2]
 
+        lim = int(ceil(self.max_radius / conv.pixelsize))
+        r = range(1, lim)
 
-def merge_similar(paths, threshold_dist):
-    if len(paths) <= 1:
-        return paths
-    # merge similar paths
-    final_paths = []
-    for i, coords in enumerate(paths):
-        if i == 0:
-            final_paths.append(coords)
-            continue
-        d = dist2(
-            coords[0],
-            final_paths[len(final_paths) - 1][
-                len(final_paths[len(final_paths) - 1]) - 1
-            ],
-        )
-        if d < threshold_dist:
-            final_paths[len(final_paths) - 1] += coords
-        else:
-            final_paths.append(coords)
+        if self.feed:
+            conv.g.set_feed(self.feed)
+        conv.g.safety()
 
-    return final_paths
+        x, y, z = p1
 
+        pixelsize = conv.pixelsize
+        
+        cx = cmp(p1[0], p2[0])
+        cy = cmp(p1[1], p2[1])
 
-def minimize_moves(paths, junction_distance=400):
-    if len(paths) <= 1:
-        return paths
-    endpoints = []
-    for _, coords in enumerate(paths):
-        if len(coords) == 0:
-            continue
-        endpoints.append(coords[0])
-        if len(coords) > 1:
-            endpoints.append(coords[len(coords) - 1])
-        else:
-            endpoints.append(coords[0])
+        radius = self.max_radius
 
-    paths_split = []
-    for _, coords in enumerate(paths):
-        path = []
-        for _, coord in enumerate(coords):
-            isclose = False
-            for _, coord2 in enumerate(endpoints):
-                if dist2(coord, coord2) < junction_distance:
-                    if len(path) > 0:
-                        paths_split.append(path)
-                    path = []
+        if cx != 0:     #if rows
+            h1 = conv.h1
+            for di in r:
+                dx = di * pixelsize
+                i = i0 + cx * di
+                if i < 0 or i >= h1: break
+                z1 = conv.get_z(i, j0)
+                dz = (z1 - z0)
+                if dz <= 0: continue
+                if dz > dx:
+                    conv.g.write("(case 1)")
+                    radius = dx
                     break
-            path.append(coord)
-        if len(path) > 0:
-            paths_split.append(path)
+                rad1 = (dx * dx / dz + dz) / 2
+                if rad1 < radius:
+                    radius = rad1
+                if dx > radius:
+                    break
 
-    log.debug(len(paths))
-    paths = paths_split.copy()
-    log.debug(len(paths))
+            z1 = min(p1[2] + radius, conv.safetyheight)
+            x1 = p1[0] + cx * circ(radius, z1 - p1[2])
+            conv.g.rapid(x1, p1[1])
+            conv.g.cut(z=z1)
 
-    tries = int(8000 / len(paths))
-    log.debug("minimizing moves for {} tries", tries)
+            conv.g.flush(); conv.g.lastgcode = None
+            if cx > 0:
+                conv.g.write("G3 X%f Z%f R%f" % (p1[0], p1[2], radius))
+            else:
+                conv.g.write("G2 X%f Z%f R%f" % (p1[0], p1[2], radius))
+            conv.g.lastx = p1[0]
+            conv.g.lasty = p1[1]
+            conv.g.lastz = p1[2]
+        else:        #if cols
+            w1 = conv.w1
+            for dj in r:
+                dy = dj * pixelsize
+                j = j0 - cy * dj
+                if j < 0 or j >= w1: break
+                z1 = conv.get_z(i0, j)
+                dz = (z1 - z0)
+                if dz <= 0: continue
+                if dz > dy:
+                    radius = dy
+                    break
+                rad1 = (dy * dy / dz + dz) / 2
+                if rad1 < radius: radius = rad1
+                if dy > radius: break
 
-    # greedy algorithm
-    # for each path, find which end is closest to any other line
-    # and add to either the beginning or the end of the path
-    bestonepath = []
-    bestonepathscore = 29997000000
-    for i in tqdm(range(tries)):
-        random.shuffle(paths)
+            z1 = min(p1[2] + radius, conv.safetyheight)
+            y1 = p1[1] + cy * circ(radius, z1 - p1[2])
+            conv.g.rapid(p1[0], y1)
+            conv.g.cut(z=z1)
 
-        totaldist = 0
-        onepath = []
-        paths_finished = {}
-        for i, coords in enumerate(paths):
-            if len(coords) == 0:
-                continue
+            conv.g.flush(); conv.g.lastgcode = None
+            if cy > 0:
+                conv.g.write("G2 Y%f Z%f R%f" % (p1[1], p1[2], radius))
+            else:
+                conv.g.write("G3 Y%f Z%f R%f" % (p1[1], p1[2], radius))
+            conv.g.lastx = p1[0]
+            conv.g.lasty = p1[1]
+            conv.g.lastz = p1[2]
+        if self.feed:
+            conv.g.set_feed(conv.feed)
 
-            if len(onepath) == 0:
-                onepath.append(coords)
-                paths_finished[i] = {}
+class Convert_Scan_Increasing:
+    def __call__(self, primary, items):
+        yield True, items
 
-            cs = onepath[0][0]
-            ce = onepath[len(onepath) - 1][len(onepath[len(onepath) - 1]) - 1]
+    def reset(self):
+        pass
 
-            minDist = 1000000000
-            onepathnext = onepath.copy()
-            bestpath = -1
-            for j, coords2 in enumerate(paths):
-                if j == i or j in paths_finished or len(coords2) == 0:
-                    continue
-                cs2 = coords2[0]
-                ce2 = coords2[len(coords2) - 1]
-                d = dist2(cs2, cs)
-                if d < minDist:
-                    minDist = d
-                    bestpath = j
-                    coords2copy = coords2.copy()
-                    coords2copy.reverse()
-                    onepathnext = onepath.copy()
-                    onepathnext = [coords2copy] + onepathnext
+class Convert_Scan_Decreasing:
+    def __call__(self, primary, items):
+        items.reverse()
+        yield True, items
 
-                d = dist2(ce, cs2)
-                if d < minDist:
-                    minDist = d
-                    bestpath = j
-                    onepathnext = onepath.copy()
-                    onepathnext = onepathnext + [coords2.copy()]
+    def reset(self):
+        pass
 
-                d = dist2(ce, ce2)
-                if d < minDist:
-                    minDist = d
-                    bestpath = j
-                    onepathnext = onepath.copy()
-                    coords2copy = coords2.copy()
-                    coords2copy.reverse()
-                    onepathnext = onepathnext + [coords2copy]
+class Convert_Scan_Upmill:
+    def __init__(self, slop = sin(pi / 18)):
+        self.slop = slop
 
-                d = dist2(cs, ce2)
-                if d < minDist:
-                    minDist = d
-                    bestpath = j
-                    onepathnext = onepath.copy()
-                    onepathnext = [coords2.copy()] + onepathnext
+    def __call__(self, primary, items):
+        for span in group_by_sign(items, self.slop, operator.itemgetter(2)):
+            if amax([it[2] for it in span]) < 0:
+                span.reverse()
+            yield True, span
 
-            onepath = onepathnext.copy()
-            paths_finished[bestpath] = {}
+    def reset(self):
+        pass
 
-        for i, path in enumerate(onepath):
-            if i == 0:
-                continue
-            d = dist2(onepath[i - 1][len(onepath[i - 1]) - 1], onepath[i][0])
-            totaldist += math.sqrt(d)
-        if len(onepath) == 1:
-            totaldist = -1
-        if totaldist < bestonepathscore and totaldist > 0:
-            bestonepathscore = totaldist
-            bestonepath = onepath.copy()
-    # maxDist = dist2(
-    #     onepath[0][0], onepath[len(onepath) - 1][len(onepath[len(onepath) - 1]) - 1]
-    # )
-    # minCut = 0
-    # for i, path in enumerate(onepath):
-    #     if i == 0:
-    #         continue
-    #     point1 = onepath[i - 1][len(onepath[i - 1]) - 1]
-    #     point2 = onepath[i][0]
-    #     d = dist2(point1, point2)
-    #     if d > maxDist:
-    #         minCut = i
-    # if minCut > 0:
-    #     log.debug("splitting at {}",minCut)
-    #     onepath = onepath[minCut:] + onepath[:minCut]
-    return bestonepath, paths_split
+class Convert_Scan_Downmill:
+    def __init__(self, slop = sin(pi / 18)):
+        self.slop = slop
 
+    def __call__(self, primary, items):
+        for span in group_by_sign(items, self.slop, operator.itemgetter(2)):
+            if amax([it[2] for it in span]) > 0:
+                span.reverse()
+            yield True, span
 
-def write_paths_to_svg(fname, paths, bounds):
-    with open(fname, "w") as f:
-        f.write(
-            f'<?xml version="1.0" standalone="yes"?><svg width="{bounds[1]-bounds[0]}" height="{bounds[3]-bounds[2]}"><g transform="translate({-bounds[0]} {-bounds[2]})">'
-        )
-        for i, path in enumerate(paths):
-            pathstring = ""
-            for j, ele in enumerate(path):
-                x1 = np.real(ele.start)
-                y1 = np.imag(ele.start)
-                x2 = np.real(ele.end)
-                y2 = np.imag(ele.end)
-                if j == 0:
-                    pathstring += f"M {int(x1)},{int(y1)} "
+    def reset(self):
+        pass
 
-                if j > 0 or len(path) == 1:
-                    pathstring += f"L {int(x2)},{int(y2)} "
-            f.write(
-                f'<path d="{pathstring}"'
-                + """ fill="none" stroke="#000000" stroke-width="0.777"/>"""
-                + "\n"
-            )
-        f.write("</g></svg>\n")
+class Reduce_Scan_Lace:
+    def __init__(self, converter, slope, keep):
+        self.converter = converter
+        self.slope = slope
+        self.keep = keep
 
+    def __call__(self, primary, items):
+        slope = self.slope
+        keep = self.keep
+        if primary:
+            idx = 3
+            test = operator.le
+        else:
+            idx = 2
+            test = operator.ge
 
-def coords_to_svg(coords_path, simplifylevel=0, minPathLength=0):
-    num_coords = 0
-    num_coords_simplified = 0
-    new_new_paths = []
-    for _, coords in enumerate(coords_path):
-        simplified = coords
-        if simplifylevel > 0:
-            log.debug("doing simplification")
-            simplified = simplify_coords(simplified, simplifylevel)
+        def bos(j):
+            return j - j % keep
 
-        num_coords += len(coords)
-        num_coords_simplified += len(simplified)
+        def eos(j):
+            if j % keep == 0: return j
+            return j + keep - j%keep
 
-        new_path = []
-        for i, coord in enumerate(simplified):
-            if i == 0 and len(simplified) == 1:
-                path = Line(
-                    complex(simplified[i][0], simplified[i][1]),
-                    complex(simplified[i][0], simplified[i][1]),
-                )
-                new_path.append(path)
-            if i == 0:
-                continue
-            path = Line(
-                complex(simplified[i - 1][0], simplified[i - 1][1]),
-                complex(simplified[i][0], simplified[i][1]),
-            )
-            new_path.append(path)
-        if len(new_path) > 0 and len(new_path) >= minPathLength:
-            new_new_paths.append(new_path)
+        for i, (flag, span) in enumerate(self.converter(primary, items)):
+            subspan = []
+            a = None
+            for i, si in enumerate(span):
+                ki = si[idx]
+                if a is None:
+                    if test(abs(ki), slope):
+                        a = b = i
+                else:
+                    if test(abs(ki), slope):
+                        b = i
+                    else:
+                        if i - b < keep: continue
+                        yield True, span[bos(a):eos(b+1)]
+                        a = None
+            if a is not None:
+                yield True, span[a:]
 
-    log.debug(f"now have {len(new_new_paths)} lines")
-    log.debug(f"have {num_coords} coordinates")
-    log.debug(f"have {num_coords_simplified} coordinates after simplifying")
-    return new_new_paths
+    def reset(self):
+        self.converter.reset()
+  
+class Convert_Scan_Alternating:
+    def __init__(self):
+        self.st = 0
 
+    def __call__(self, primary, items):
+        st = self.st = self.st + 1
+        if st % 2: items.reverse()
+        if st == 1: yield True, items
+        else: yield False, items
 
-def processAutotraceSVG(
-    fnamein,
-    fnameout,
-    drawing_area=[650, 1775, -1000, 1000],
-    simplifylevel=1,
-    minPathLength=1,
-    mergeSize=1,
-    minimizeMoves=True,
-    junction_distance=400,
-):
-    if minPathLength < 0:
-        minPathLength = 0
-    paths, attributes, svg_attributes = svg2paths2(fnamein)
-    log.info("have {} paths", len(paths))
+    def reset(self):
+        self.st = 0
 
-    log.debug("converting beziers to lines")
+def make_tool_shape(f, wdia, resp, is_offset= False, tool_type=0, wdia2=-9999, degr=60, units=0):
+    res = 1. / resp
+    
+    # if cell_center:  =-> 'smooth terrain, but can cut the edge'; 
+    # elif 'cell_contact' in other words 'Touch a cell at the nearest point': =-> 'more accurate'
+    #
+    # if cell_coeff ==  0 -   0% - the same as 'cell contact'; 
+    # if cell_coeff ==2/3 -  33% - this is '33% from cell contact'; 
+    # if cell_coeff ==  1 -  50% - this is 'cell center'; 
+    # if cell_coeff ==  2 - 100% - this is 'the far corner of the cell'; This is MAX of cell_coeff.
+    cell_coeff = 2./3.
 
-    new_paths = []
-    for ii, path in enumerate(attributes):
-        new_path = []
-        # if "000000" not in attributes[ii]["style"]:
-        #     continue
-        path = parse_path(attributes[ii]["d"])
-        for jj, ele in enumerate(path):
-            x1 = round(np.real(ele.start) + drawing_area[0])
-            y1 = round(np.imag(ele.start) + drawing_area[2])
-            x2 = round(np.real(ele.end) + drawing_area[0])
-            y2 = round(np.imag(ele.end) + drawing_area[2])
-            if "CubicBezier" in str(ele):
-                n_segments = 6
-                # get curve segment generator
-                curve = cubic_bezier_sample(
-                    ele.start, ele.control1, ele.control2, ele.end
-                )
-                # get points on curve
-                points = np.array([curve(t) for t in np.linspace(0, 1, n_segments)])
-                for k, _ in enumerate(points):
-                    if k == 0:
-                        continue
-                    new_path.append(
-                        Line(
-                            complex(np.real(points[k - 1]), np.imag(points[k - 1])),
-                            complex(np.real(points[k]), np.imag(points[k])),
-                        )
-                    )
-            elif "Line" in str(ele):
-                new_path.append(Line(ele.start, ele.end))
-            elif "Move" in str(ele):
-                new_paths.append(new_path)
-                new_path = []
-            elif "Close" in str(ele):
-                new_paths.append(new_path)
-                new_path = []
+    # that there - dia - is always an odd
+    # because that more accurately
+    always_an_odd = True
 
-        if len(new_path) > 0:
-            new_paths.append(new_path)
+    dia = int(wdia*res)
+    if dia/res < wdia: dia = dia +1
+    if dia < 1: dia = 1
+    
+    if is_offset:
+        if dia == 1: 
+            dia = 2
+            if prn_detail > 0: print("(Warning: offset[{0}] <= pixel size[{1}]! Use function correct_offset!)".format((wdia/2),resp))
+            #this not enaf! Use function correct_offset - for correct offset!
+            wdia = resp*2
+    
+    if always_an_odd and not dia % 2: dia = dia +1
 
-    # translate to bounding area
-    new_new_paths = []
-    coords_path = []
-    for i, path in enumerate(new_paths):
-        coords = []
-        for j, ele in enumerate(path):
-            x1 = round(np.real(ele.start) + drawing_area[0])
-            y1 = round(np.imag(ele.start) + drawing_area[2])
-            x2 = round(np.real(ele.end) + drawing_area[0])
-            y2 = round(np.imag(ele.end) + drawing_area[2])
-            if j == 0 and len(path) > 0:
-                coords.append([x1, y1])
-            coords.append([x2, y2])
-        if len(coords) >= minPathLength:
-            coords_path.append(coords)
+    if is_offset and prn_detail > 0: print("(Real offset = {0} dia: {1} pixels)".format((dia*resp/2),dia))
 
-    write_paths_to_svg(
-        "new_paths.svg",
-        coords_to_svg(coords_path, simplifylevel=0, minPathLength=0),
-        drawing_area,
-    )
+    wrad = wdia/2.
+    wrad0= wrad
 
-    if minimizeMoves and len(coords_path) > 1:
-        log.debug("doing minimization")
-        log.debug("coords_path length: {}", len(coords_path))
-        write_paths_to_svg(
-            "final_unminimized.svg",
-            coords_to_svg(
-                coords_path, simplifylevel=simplifylevel, minPathLength=minPathLength
-            ),
-            drawing_area,
-        )
-        log.debug(junction_distance)
-        coords_path, paths_split = minimize_moves(
-            coords_path, junction_distance=junction_distance
-        )
-        write_paths_to_svg(
-            "final_unminimized_split.svg",
-            coords_to_svg(
-                paths_split, simplifylevel=simplifylevel, minPathLength=minPathLength
-            ),
-            drawing_area,
-        )
-    log.debug("coords_path length: {}", len(coords_path))
+    if wdia2 > wdia and degr > 0 and degr < 180:
+        degr2 = (180-degr)/2
+        
+        f2 = vee_common(degr)
+        if tool_type == 0:
+            wrad0 = cos(radians(90-degr2))*wrad
 
-    if mergeSize > 1:
-        log.debug("doing merge")
-        coords_path = merge_similar(coords_path, mergeSize ** 2)
+            if wrad0 > wrad or wrad0 == 0 and prn_detail > -1: print("( Error tool2(2): ",wrad0, " )")
+            if prn_detail > 1: print("( Radius of Ball End: {0:.2f} )".format(wrad0))
 
-    new_new_paths = coords_to_svg(
-        coords_path, simplifylevel=simplifylevel, minPathLength=minPathLength
-    )
-    write_paths_to_svg("final.svg", new_new_paths, drawing_area)
-    write_paths_to_gcode("image.gc", new_new_paths)
-    return new_new_paths
+        if   tool_type == 0: h0 = (wrad - sin(radians(90-degr2))*wrad) / sin(radians(90-degr2))
+        elif tool_type == 1: h0 = wrad/tan(radians(degr/2))
+        elif tool_type == 2: h0 = f2(wrad, wrad) - f(wrad, wrad)
+        elif tool_type == 3: h0 = f2(wrad, wrad) - f(wrad, wrad)
+        elif tool_type == 4: h0 = f2(wrad, wrad) - f(wrad, wrad)
+        elif tool_type == 5: h0 = f2(wrad, wrad) - f(wrad, wrad)
 
+        wrad2 = wdia2/2.
+        dia2= int(wdia2*res+.5)
+        if dia2/res < wdia2: dia2 = dia2 +1
+    
+        if always_an_odd and not dia2 % 2: dia2 = dia2 +1
 
-def processSVG(
-    fnamein,
-    fnameout,
-    simplifylevel=5,
-    pruneLittle=7,
-    drawing_area=[650, 1775, -1000, 1000],
-):
-    paths, attributes, svg_attributes = svg2paths2(fnamein)
-    log.info("have {} paths", len(paths))
+        dia = max(dia,dia2)
+    else:
+        wrad2 = -plus_inf
 
-    log.debug("converting beziers to lines")
+    #n = np.array([[plus_inf] * dia] * dia, type="Float32")
+    n = np.array([[plus_inf] * dia] * dia, dtype=np.float32)
+    hdia = dia / 2.
+    #hdia = int(hdia)
+    l = []
 
-    new_paths = []
-    for ii, path in enumerate(attributes):
-        new_path = []
-        path = parse_path(attributes[ii]["d"])
-        for jj, ele in enumerate(path):
-            x1 = np.real(ele.start)
-            y1 = np.imag(ele.start)
-            x2 = np.real(ele.end)
-            y2 = np.imag(ele.end)
-            if "CubicBezier" in str(ele):
-                n_segments = 5
-                # get curve segment generator
-                curve = cubic_bezier_sample(
-                    ele.start, ele.control1, ele.control2, ele.end
-                )
-                # get points on curve
-                points = np.array([curve(t) for t in np.linspace(0, 1, n_segments)])
-                for k, _ in enumerate(points):
-                    if k == 0:
-                        continue
-                    new_path.append(
-                        Line(
-                            complex(np.real(points[k - 1]), np.imag(points[k - 1])),
-                            complex(np.real(points[k]), np.imag(points[k])),
-                        )
-                    )
-            elif "Line" in str(ele):
-                new_path.append(Line(ele.start, ele.end))
-            elif "Move" in str(ele):
-                if len(new_path) > 0:
-                    new_paths.append(new_path)
-                new_path = []
-            elif "Close" in str(ele):
-                if len(new_path) > 0:
-                    new_paths.append(new_path)
-                new_path = []
+    for x in range(dia):
+        for y in range(dia):
+            if dia % 2 and x == dia/2 and y == dia/2:
+                z = f(0, wrad)
+                l.append(z)
+                if z != 0.: 
+                    if prn_detail > -1: print("( Error(0) tool center mast be = 0, bat z=",z, " )")
+                    z = 0 
+                n[x,y] = z  # z = 0 - mast be
+            else:
 
-        if len(new_path) > 0:
-            new_paths.append(new_path)
+                x1 = x-hdia
+                y1 = y-hdia
+                dopx2 = 0.
+                dopy2 = 0.
 
-    # transform points
-    bounds = [
-        0.0,
-        10 * (drawing_area[1] - drawing_area[0]),
-        0.0,
-        10 * (drawing_area[3] - drawing_area[2]),
-    ]
-    num_coords = 0
-    num_coords_simplified = 0
-    new_paths_flat = []
-    new_new_paths = []
-    for j, path in enumerate(new_paths):
-        coords = []
-        for i, ele in enumerate(path):
-            x1 = (np.real(ele.start) - bounds[0]) / (bounds[1] - bounds[0]) * (
-                drawing_area[1] - drawing_area[0]
-            ) + drawing_area[0]
-            y1 = (np.imag(ele.start) - bounds[2]) / (bounds[3] - bounds[2]) * (
-                drawing_area[3] - drawing_area[2]
-            ) + drawing_area[2]
-            x2 = (np.real(ele.end) - bounds[0]) / (bounds[1] - bounds[0]) * (
-                drawing_area[1] - drawing_area[0]
-            ) + drawing_area[0]
-            y2 = (np.imag(ele.end) - bounds[2]) / (bounds[3] - bounds[2]) * (
-                drawing_area[3] - drawing_area[2]
-            ) + drawing_area[2]
-            x1 = round(x1)
-            y1 = round(y1)
-            x2 = round(x2)
-            y2 = round(y2)
-            coords.append([x1, y1])
-            coords.append([x2, y2])
+                if x1 <= 0. and y1 < 0.:
+                    if x1 == 0.: dopx = 0.
+                    elif x1 >= -.5: dopx = 0.5
+                    else: 
+                        dopx = 1
+                        dopx2 = -0.5
 
-        simplified = coords
-        if simplifylevel > 0:
-            simplified = simplify_coords(simplified, simplifylevel)
+                    if y1 == 0.: dopy = 0.
+                    elif y1 >= -.5: dopy = 0.5
+                    else: 
+                        dopy = 1
+                        dopy2 = -0.5
+                elif x1 <= 0.:
+                    if x1 == 0.: dopx = 0.
+                    elif x1 >= -.5: dopx = 0.5
+                    else: 
+                        dopx = 1
+                        dopx2 = -0.5
+                    dopy = 0
+                    dopy2 = 0.5
+                elif y1 < 0.:
+                    dopx = 0
+                    dopx2 = 0.5
+                    if y1 == 0.: dopy = 0.
+                    elif y1 >= -.5: dopy = 0.5
+                    else: 
+                        dopy = 1
+                        dopy2 = -0.5
+                else:
+                    dopx = 0
+                    dopy = 0
+                    dopx2 = 0.5
+                    dopy2 = 0.5
 
-        num_coords += len(coords)
-        num_coords_simplified += len(simplified)
+                dopx2 *= cell_coeff
+                dopy2 *= cell_coeff
+            
+                r = hypot(x1+dopx+dopx2,   y1+dopy+dopy2)   * resp
 
-        new_path = []
-        for i, coord in enumerate(simplified):
-            if i == 0 and len(simplified) > 0:
-                continue
-            path = Line(
-                complex(simplified[i - 1][0], simplified[i - 1][1]),
-                complex(simplified[i][0], simplified[i][1]),
-            )
-            new_path.append(path)
-            new_paths_flat.append(path)
-            # new_paths[j][i] = Line(complex(x1,y1),complex(x2,y2))
-        new_new_paths.append(new_path)
+                if r < wrad0:
+                    z = f(r, wrad)
+                    l.append(z)
+                    n[x,y] = z
+                    if z < 0. and prn_detail > -1: print("( tool error 1: r=",r," x=",x," y=",y," hight<0 hight= ",z,", mast be >= 0 )")
+                    #if z > 300: print(" error 1: tool hight1: r=",r," x=",x," y=",y," hight= ",z," is too big!")
+                elif r < wrad2:
+                    z = f2(r,wrad2) - h0
+                    l.append(z)
+                    n[x,y] = z
+                    if z < 0. and prn_detail > -1: print("( tool error 2: r=",r," x=",x," y=",y," z<0 z= ",z,", mast be >= 0 )")
+                    #if z > 300: print(" error 2: tool hight1: r=",r," x=",x," y=",y," hight= ",z," is too big!")
 
-    log.debug(f"have {num_coords} coordinates")
-    log.debug(f"have {num_coords_simplified} coordinates after simplifying")
-    write_paths_to_svg(fnameout, new_new_paths, drawing_area)
+    if n.min() != 0. and prn_detail > -1: print("( error(0): tool.minimum = ",n.min(),", mast be == 0 )")
+    return n
 
-    log.debug("wrote image to {}", fnameout)
+def correct_offset(offset, resp):
+    if offset > epsilon and offset < resp: 
+        if prn_detail > -1: print("(Warning: offset[{0}] <= pixel size[{1}]. New offset = {1} units)".format(offset,resp))
+        offset = resp
+    return offset
 
-    write_paths_to_gcode("image.gc", new_new_paths)
+def optim_tool_shape(n,hig,offset,tolerance):
 
-    return new_new_paths
+    #return n
+
+    lineLF = -1
+    minH = hig+offset+tolerance+.5
+    P = True
+    dia = len(n)
+    while P and lineLF < (dia-1):
+        lineLF = lineLF + 1
+        #left
+        for x in range(dia):
+            if n[lineLF,x] < minH:
+                P = False
+                break
+
+        if P:
+            #up
+            for y in range(dia):
+                if n[y,lineLF] < minH:
+                    P = False
+                    break
+    #@ dia = 3, lineLF = 1
+
+    #lineLF = lineLF - 1
+
+    if lineLF > 0:
 
 
-def rgb(minimum, maximum, value):
-    minimum, maximum = float(minimum), float(maximum)
-    ratio = 2 * (value - minimum) / (maximum - minimum)
-    b = int(max(0, 255 * (1 - ratio)))
-    r = int(max(0, 255 * (ratio - 1)))
-    g = 255 - b - r
-    return (r, g, b)
+        P = True
+        line2 = dia
+        while P and line2 >= lineLF:
+            line2 = line2 - 1
+            #right
+            for x in range(dia):
+                if n[line2,x] < minH:
+                    P = False
+                    break
+            if P:
+                #down
+                for y in range(dia):
+                    if n[y,line2] < minH:
+                        P = False
+                        break
+        #@ dia = 3, line2 = 1
+        line2 = line2 + 1
 
+        if prn_detail > 1: print("( tool opitimize - dia = ",dia," lines:)")
+        if prn_detail > 1: print("( cut lines[left  and up  ]: ",lineLF,")")
+        if prn_detail > 1: print("( cut lines[right and down]: ",(dia-line2),")")
 
-def animateProcess(new_paths, bounds, fname="out.gif"):
-    images = []
-    color_1 = (0, 0, 0)
-    color_2 = (255, 255, 255)
-    print(bounds)
-    im = Image.new("RGB", (bounds[1] - bounds[0], bounds[3] - bounds[2]), color_2)
-    last_point = [0, 0]
-    gifmod = 4
-    total_paths = 0
-    for _, path in enumerate(new_paths):
-        for _, ele in enumerate(path):
-            total_paths += 1
-    if total_paths > 100:
-        gifmod = int(total_paths / 100)
+        if line2 < dia:
+            dia2 = line2 - lineLF
+            n2 = np.array([[plus_inf] * dia2] * dia2, dtype=np.float32)
+            d2range = range(lineLF,line2)
+            for x in d2range:
+                for y in d2range:
+                    n2[x-lineLF,y-lineLF] = n[x,y]
+        else:
+            dia2 = dia - lineLF
+            n2 = np.array([[plus_inf] * dia2] * dia2, dtype=np.float32)
+            d2range = range(lineLF,dia)
+            for x in d2range:
+                for y in d2range:
+                    n2[x-lineLF,y-lineLF] = n[x,y]
+        if len(n2) == 0 and prn_detail > -1: print("( Error(): ",dia,lineLF,line2," )")
+        if n2.min() != 0 and prn_detail > -1: print("( Error(): n2=",n2," )")
+        return n2
+    else:
+        return n
 
-    i = 0
-    for j, path in enumerate(new_paths):
-        for _, ele in enumerate(path):
-            x1 = np.real(ele.start) - bounds[0]
-            y1 = np.imag(ele.start) - bounds[2]
-            x2 = np.real(ele.end) - bounds[0]
-            y2 = np.imag(ele.end) - bounds[2]
-            draw = ImageDraw.Draw(im)
-            draw.line((x1, y1, x2, y2), fill=color_1, width=8)
-            i += 1
-            if i % gifmod == 0 or i >= total_paths - 1:
-                im0 = im.copy()
-                images.append(im0)
-    log.debug(len(images))
-    log.debug(f"saving {fname}")
-    images[0].save(
-        fname,
-        save_all=True,
-        append_images=images[1:],
-        optimize=True,
-        duration=int(5000 / float(len(images))),
-        loop=1,
-    )
+def amax(seq):
+    res = 0
+    for i in seq:
+        if abs(i) > abs(res): res = i
+    return res
+
+def group_by_sign(seq, slop=sin(pi/18), key=lambda x:x):
+    sign = None
+    subseq = []
+    for i in seq:
+        ki = key(i)
+        if sign is None:
+            subseq.append(i)
+            if ki != 0:
+                sign = ki / abs(ki)
+        else:
+            subseq.append(i)
+            if sign * ki < -slop:
+                sign = ki / abs(ki)
+                yield subseq
+                subseq = [i]
+    if subseq: yield subseq
+
+def ball_tool(r,rad):
+    if r == rad: return rad
+    #s = -sqrt(rad**2-r**2)
+    s = rad-sqrt(rad**2-r**2)
+    return s
+
+tool_makers = [ ball_tool, endmill, vee_common(30), vee_common(45), vee_common(60), vee_common(90)]
+
+def tool_info(tool_type=0, wdia=0, wdia2=-9999, degr=60, units=0):
+    toolTypeStr = ("Ball End","Flat End","30 Degree","45 Degree","60 Degree","90 Degree","?")
+    if units == 0:
+        unitsStr = "inch"
+    else:
+        unitsStr = "mm"
+    print("( Tool info: )")
+    if wdia2 > wdia and degr > 0 and degr < 180:
+        print("( Tool type: Cone {0} )".format(toolTypeStr[tool_type]))
+        print("( Tool diameter: {0}{1} )".format(wdia2,unitsStr))
+        print("( Tool tip diameter: {0}{1} )".format(wdia,unitsStr))
+        print("( Tool angle: {0}degree )".format(degr))
+        print("( Tool conical segment approx length: {0:.2f}{1} )".format(((wdia2/2)/tan(radians(degr/2)))-((wdia/2)/tan(radians(degr/2))),unitsStr))
+    else:
+        print("( Tool type: {0} )".format(toolTypeStr[tool_type]))
+        print("( Tool diameter: {0}{1} )".format(wdia,unitsStr))

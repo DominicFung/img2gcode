@@ -3,17 +3,19 @@ from math import *
 import numpy as np
 import sys, os
 
-from grayutil import Convert_Scan_Increasing, Convert_Scan_Decreasing, Convert_Scan_Alternating, Convert_Scan_Upmill, Convert_Scan_Downmill, Reduce_Scan_Lace, ArcEntryCut, correct_offset, make_tool_shape, optim_tool_shape, ball_tool, tool_info, make_tool_shape, tool_makers
+from util import Convert_Scan_Increasing, Convert_Scan_Decreasing, Convert_Scan_Alternating, Convert_Scan_Upmill, Convert_Scan_Downmill, Reduce_Scan_Lace, ArcEntryCut, correct_offset, make_tool_shape, optim_tool_shape, ball_tool, tool_info, make_tool_shape, tool_makers
 from author import Gcode
 
 unitcodes = ['G20', 'G21']
 convert_makers = [ Convert_Scan_Increasing, Convert_Scan_Decreasing, Convert_Scan_Alternating, Convert_Scan_Upmill, Convert_Scan_Downmill ]
 
+from loguru import logger as log
+
 prn_detail = 0
 epsilon = 1e-5
 epsilon16 = 1e-16
 is_ddd1 = True
-roughing_depth_delta = 0.2 
+roughing_depth_delta = 0.2
 
 importErrStr = ""
 
@@ -72,6 +74,7 @@ class Converter:
         self.pattern_objectiv = pattern_objectiv
         self.row_mill = (self.convert_rows != None)
         self.start_moment = datetime.datetime.now()
+        # self.roughing_depth_delta = roughing_depth
 
         self.roughing_offset = correct_offset(self.roughing_offset, self.pixelsize)
         self.previous_offset = correct_offset(self.previous_offset, self.pixelsize)
@@ -217,8 +220,7 @@ class Converter:
 
     def make_offset(self,offset,image):
         if offset > epsilon16:
-            rough = make_tool_shape(ball_tool,
-                                2*offset, self.pixelsize, True)
+            rough = make_tool_shape(ball_tool, 2*offset, self.pixelsize, True)
             rough = optim_tool_shape(rough,-image.min(),offset,max(self.pixelsize,self.tolerance))
             w, h = image.shape
             tw, th = rough.shape
@@ -231,6 +233,7 @@ class Converter:
             for j in range(0, w):
                 for i in range(0, h):
                     image[j,i] = (nim1[j:j+tw,i:i+th] - rough).max()
+
         return image
 
     def convert(self):
@@ -245,96 +248,30 @@ class Converter:
         if self.safetyheight == 0 and prn_detail > -1: 
             print("(Warning: safety height = 0! You can give error like: 'Start of arc is the same as end!')")
 
-
         if prn_detail > -1 and self.MaxBackground_up <= self.MaxBackground_down:
-
                 print("Error(!): Max background border down[{0}] >= Max background border up[{1}]! G-kode can not be formed.".format(self.MaxBackground_down, self.MaxBackground_up))
                 print("     ...check background_border and image depth!")
                 return
 
-
         self.layer_depth_prev = 9999.0    #'layer_depth_prev' need for 'optimize_path'
-        if self.pattern_objectiv:
+        
+        if (self.roughing_depth > epsilon16 and self.roughing_offset > epsilon16) or (self.roughing_depth > epsilon16 and self.optimize_path > epsilon16):
+            log.debug(f"(self.roughing_depth > epsilon16 and self.roughing_offset > epsilon16): {(self.roughing_depth > epsilon16 and self.roughing_offset > epsilon16)}")
+            log.debug(f"(self.roughing_depth > epsilon16 and self.optimize_path > epsilon16): {(self.roughing_depth > epsilon16 and self.optimize_path > epsilon16)}")
 
-            base_image = self.image
-            self.feed = self.roughing_feed
-
-            if not self.roughing_minus_finishing:
-                self.image = self.make_offset(self.roughing_offset,self.image)
-            else:
-                
-                offset_image = self.make_offset(self.previous_offset,self.image)
-                self.layer_depth = self.image.min()
-                map_tool1 = self.get_rmf_map_tool(offset_image,self.tool_roughing,self.previous_offset,self.pixelstep_roughing)
-
-                self.image = self.make_offset(self.roughing_offset,self.image)
-                self.ro = self.roughing_offset
-                self.set_rmf(base_image,map_tool1)
-
-                #comented corth not used get_z in set_rmf and get_rmf_map_tool
-                #self.cache.clear()
-
-
-
-
-
-                #The following code is needed if you are using not two, but 3, 4, 5, ... cutter, 
-                # and want to make a difference between:
-                #   what is left clean after used cutter 
-                #       and next cutter.
-
-                '''#----------------------------------------------------------------
-                # delta_map_tool2 = min(map_tool1,map_tool2)
-                next_roughing_offset = 0.3
-                next_tool_diameter = 1.5
-                next_tool_type = ball_tool
-                next_pixelstep = 1
-                next_roughing_depth = 1.7
-                next_min_delta_rmf = 2.0 #0.0 #1.8 #
-                map_tool2 = self.get_rmf_map_tool_next(base_image,map_tool1,next_roughing_offset,next_tool_diameter,\
-                                            next_tool_type,next_pixelstep,next_roughing_depth,next_min_delta_rmf)
-                self.set_rmf(base_image,map_tool2)
-                #----------------------------------------------------------------'''
-
-
-                '''#----------------------------------------------------------------
-                # delta_map_tool3 = min(map_tool2,map_tool3)
-                next_roughing_offset = 0
-                next_tool_diameter = 0.4
-                next_tool_type = ball_tool
-                next_pixelstep = 1
-                next_roughing_depth = 0.4
-                next_min_delta_rmf = 1.2 #0.3 #
-                map_tool3 = self.get_rmf_map_tool_next(base_image,map_tool2,next_roughing_offset,next_tool_diameter,\
-                                            next_tool_type,next_pixelstep,next_roughing_depth,next_min_delta_rmf)
-                self.set_rmf(base_image,map_tool3)
-                #----------------------------------------------------------------'''
-            
-
-        elif (self.roughing_depth > epsilon16 and self.roughing_offset > epsilon16) or (self.roughing_depth > epsilon16 and self.optimize_path > epsilon16):
             base_image = self.image
             self.image = self.make_offset(self.roughing_offset,self.image)
 
+            log.debug(f"roughing feed: {self.roughing_feed}")
+
             self.feed = self.roughing_feed
             self.ro = self.roughing_offset
-            m = self.image.min() + self.ro
-
-            r = -self.roughing_depth
             self.layer_depth = .0
-
-            while r > m:
-                self.layer_depth = r
-                self.one_pass()
-                self.layer_depth_prev = self.layer_depth    #'layer_depth_prev' need for 'optimize_path'
-                r = r - self.roughing_depth
-            if self.layer_depth_prev > m + epsilon:
-                self.layer_depth = m
-                if prn_detail > 0: print("(Layer: {0} previous LD={1} < m[{2}]+epsilon[{3}]={4})".format(self.layer,self.layer_depth,m,epsilon,(m + epsilon)))
-                self.one_pass()
-                self.layer_depth_prev = self.layer_depth    #'layer_depth_prev' need for 'optimize_path'
+            
             self.optimize_path = False
             self.image = base_image
             self.cache.clear()
+        
         self.feed = self.base_feed
         if self.roughing_minus_finishing or self.optimize_path:
             self.ro = self.roughing_offset
@@ -2051,14 +1988,14 @@ options = dict(
     normalize = False,
     expand = 0,
     pixel_size = .006,
-    depth = 0.25,
+    # depth = 5, # 0.25
     background_border = .0,
     max_bg_len = 1,
     pixelstep = 8,
     safety_height = .012,
-    tool_diameter = 1/16.,
+    # tool_diameter = 1/16.,
     tool_type = 0,
-    tool_diameter2 = 1/16.,
+    # tool_diameter2 = 1/16.,
     angle2 = .0,
     tolerance = .001,
     feed_rate = 12,
@@ -2074,22 +2011,19 @@ options = dict(
     roughing_minus_finishing = False,
     min_delta_rmf = .0,
     previous_offset = .1,
-    roughing_offset = .1,
-    roughing_depth = .25,
+    roughing_offset = .1,   # .1
+    roughing_depth = .25,   # .25
     pixelstep_roughing = 8,
-    tool_diameter_roughing = 1/16.,
     tool_type_roughing = 0,
-    tool_diameter_roughing2 =1/16.,
     angle2_roughing=.0,
     cut_top_jumper = False,
     detail_of_comments = 0
 )
 
-def gray2gcode(im_name):
+def gray2gcode(im_name, depth, spacing):
     from PIL import Image
 
     im = Image.open(im_name)
-    size = im.size
     im = im.convert("L") #grayscale
     w, h = im.size
     try:
@@ -2110,9 +2044,7 @@ def gray2gcode(im_name):
         sys.stdout = open(newDir+"/"+finalFileName, 'w')
     
     step = options['pixelstep']
-    depth = options['depth']
-
-    tool_info(options['tool_type'], options['tool_diameter'], options['tool_diameter2'], options['angle2'], options['units'])
+    tool_info(options['tool_type'], spacing, spacing, options['angle2'], options['units'])
 
     if options['normalize']:
         a = nim.min()
@@ -2123,9 +2055,8 @@ def gray2gcode(im_name):
         nim = nim / 255.0
 
     maker = tool_makers[options['tool_type']]
-    tool_diameter = options['tool_diameter']
     pixel_size = options['pixel_size']
-    tool = make_tool_shape(maker, tool_diameter, pixel_size,False,options['tool_type'],options['tool_diameter2'],options['angle2'])
+    tool = make_tool_shape(maker, spacing, pixel_size,False, options['tool_type'], spacing, options['angle2'])
     tool = optim_tool_shape(tool,depth,options['roughing_offset'],max(options['pixel_size'],options['tolerance']))
 
     if options['expand']:
@@ -2171,9 +2102,8 @@ def gray2gcode(im_name):
                 convert_rows = Reduce_Scan_Lace(convert_rows, slope, step+1)
 
     maker_roughing = tool_makers[options['tool_type_roughing']]
-    tool_diameter_roughing = options['tool_diameter_roughing']
-    tool_roughing = make_tool_shape(maker_roughing, tool_diameter_roughing, pixel_size,False,options['tool_type_roughing'],options['tool_diameter_roughing2'],options['angle2_roughing'])
-    tool_roughing = optim_tool_shape(tool_roughing,depth,options['roughing_offset'],max(options['pixel_size'],options['tolerance']))
+    tool_roughing = make_tool_shape(maker_roughing, spacing, pixel_size, False, options['tool_type_roughing'], spacing, options['angle2_roughing'])
+    tool_roughing = optim_tool_shape(tool_roughing, depth, options['roughing_offset'], max(options['pixel_size'],options['tolerance']))
 
     units = unitcodes[options['units']]
     convert(nim, units, tool, pixel_size, step,

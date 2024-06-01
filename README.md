@@ -1,6 +1,6 @@
-# img2gcode.py
+# Tufting CNC: GCode Generator
 
-This script, `img2gcode.py` will take any image and convert it into a nice line drawing with GCode coordinates. You can take a scanned drawing, or black and white digital sketch like below and convert it into lines to be plotted.
+This script, `img2gcode.py` generates gcode for any CNC machine modified to tuft rugs! 
 
 <p align="center">
 <img src=".github/sun.jpg" height=300>
