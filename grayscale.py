@@ -20,6 +20,8 @@
 ## image-to-gcode.py is Copyright (C) 2018 Yaroslav Vlasov
 ## ysvlasov@yandex.ru
 
+## looks like you can view the .nc file here: https://ncviewer.com/
+
 VersionI2G = "3.8.9"
 
 printToFile = True
@@ -479,12 +481,12 @@ class Reduce_Scan_Lace:
 unitcodes = ['G20', 'G21']
 convert_makers = [ Convert_Scan_Increasing, Convert_Scan_Decreasing, Convert_Scan_Alternating, Convert_Scan_Upmill, Convert_Scan_Downmill ]
 
-def progress(a, b, cstr="FILTER_PROGRESS=%d"):
-    print(originalStdout, "\rProgress: {0:6.2f}%".format((a*100./b+.5)),)
-    #originalStdout.flush()    
-    # if os.environ.has_key("AXIS_PROGRESS_BAR"):
-    #     print(sys.stderr, cstr % int(a*100./b+.5))
-    #     sys.stderr.flush()
+# def progress(a, b, cstr="FILTER_PROGRESS=%d"):
+#     print(originalStdout, "\rProgress: {0:6.2f}%".format((a*100./b+.5)),)
+#     originalStdout.flush()    
+#     if os.environ.has_key("AXIS_PROGRESS_BAR"):
+#         print(sys.stderr, cstr % int(a*100./b+.5))
+#         sys.stderr.flush()
 
 class Converter:
     def __init__(self,
@@ -581,8 +583,8 @@ class Converter:
         self.layer = self.layer + 1
         if prn_detail > 0:
             print("(Layer {0} layer depth {1})".format(self.layer,self.layer_depth))
-            if printToFile:
-                print(originalStdout, "Layer {0} layer depth {1} is started, pleas wait...".format(self.layer,self.layer_depth))
+            # if printToFile:
+            #     print(originalStdout, "Layer {0} layer depth {1} is started, pleas wait...".format(self.layer,self.layer_depth))
 
 
 
@@ -682,13 +684,10 @@ class Converter:
             h1 = h + th
             nim1 = np.zeros((w1, h1), dtype=np.float32) + image.min()
 
-            # log.info(f"test")
-            print("test")
-
             nim1[int(tw/2):int(tw/2+w), int(th/2):int(th/2+h)] = image
             image = np.zeros((w,h), dtype=np.float32)
             for j in range(0, w):
-                progress(j,w)
+                # progress(j,w)
                 for i in range(0, h):
                     image[j,i] = (nim1[j:j+tw,i:i+th] - rough).max()
         return image
@@ -702,10 +701,11 @@ class Converter:
         g.continuous(self.tolerance)
         g.safety()
 
-        if prn_detail > 0:
-            print("(Start make g-kod at {0})".format(datetime.datetime.now()))
-            if printToFile:
-                print(originalStdout, "Start make g-kod at {0}, please wait...".format(datetime.datetime.now()))
+        # if prn_detail > 0:
+        #     print("(Start make g-kod at {0})".format(datetime.datetime.now()))
+        #     if printToFile:
+        #         print(originalStdout, "Start make g-kod at {0}, please wait...".format(datetime.datetime.now()))
+
         if self.safetyheight == 0 and prn_detail > -1: 
             print("(Warning: safety height = 0! You can give error like: 'Start of arc is the same as end!')")
 
@@ -809,7 +809,7 @@ class Converter:
         g.end()
         timing = "End make at: "+str(datetime.datetime.now().strftime("%d-%m-%Y %H:%M:%S"))+" Total time: "+str((datetime.datetime.now()-self.start_moment))
         if prn_detail > 0: print("( {0} )".format(timing))
-        print(originalStdout, "\rProgress: 100% completed.\nSUCCESS!\n\n", timing)
+        # print(originalStdout, "\rProgress: 100% completed.\nSUCCESS!\n\n", timing)
         
     def get_dz_dy(self, x, y):
         y1 = max(0, y-1)
@@ -878,7 +878,7 @@ class Converter:
         trange = range(0,ts_roughing)
 
         for ry in jrange:    #lines
-            progress(ry, ln)
+            # progress(ry, ln)
             for rx in irange:    #pixels
 
                 if self.row_mill:
@@ -931,7 +931,7 @@ class Converter:
         trange = range(0,self.ts)
 
         for lin in jrange:    #lines
-            progress(lin, ln)
+            # progress(lin, ln)
             for pix in irange:    #pixels
 
                 if self.row_mill:
@@ -1063,7 +1063,7 @@ class Converter:
 
         if not self.row_mill: lines.reverse()
         for j in lines:
-            progress(j, ld)
+            # progress(j, ld)
             Pixel_entry_f,Pixel_entry_l = make_gk[j]
                         
             #can't make g-code from 1 pixel
@@ -1422,7 +1422,7 @@ class Converter:
         if not self.row_mill: gk_rows.reverse()
 
         for j in gk_rows:   #lines
-            progress(j, ld)
+            # progress(j, ld)
 
             if self.row_mill:
                 if line_cache > j: continue
@@ -1756,7 +1756,7 @@ class Converter:
         if ld <= 1: return mas_glp
 
         for num in objects_layer: #main obj
-            progress(num, ld)
+            # progress(num, ld)
             y,x,make_gk = objects_layer[num]      #objects_layer - {1: {59: (0, 0), 60: (0, 3), 61: (0, 3)}}
             for rw in make_gk:  #rows
                 Cur_f, Cur_l = make_gk[rw]
@@ -2202,7 +2202,7 @@ class Converter:
                 cur_npp = len(processed_obj)
                 processed_obj[layer,object_num] = cur_npp
 
-                progress(cur_npp, item_npp)
+                # progress(cur_npp, item_npp)
 
                 try: 
                     stek_objs[layer].remove(object_num)
@@ -2379,7 +2379,7 @@ class Converter:
         indx_j = 0
         Prev_line = -1
         for j in jrange:    #rows
-            progress(indx_j, max_j)
+            # progress(indx_j, max_j)
 
             # find background--------------------------------------
             st = st + 1
@@ -2456,7 +2456,7 @@ class Converter:
         indx_j = 0
         Prev_line = -1
         for j in jrange:    #cols
-            progress(indx_j, max_j)
+            # progress(indx_j, max_j)
 
             # find background--------------------------------------
             st = st + 1
@@ -2940,7 +2940,7 @@ def ui(im, nim, im_name):
         tool_diameter_roughing2 =1/16.,
         angle2_roughing=.0,
         cut_top_jumper = False,
-        detail_of_comments = 1
+        detail_of_comments = 0
     )
 
     texts = dict(
@@ -3251,6 +3251,7 @@ def main():
         if not im_name: raise SystemExit
         # _default_root.destroy()
         # _default_root = None
+    print(im_name)
     im = Image.open(im_name)
     size = im.size
     im = im.convert("L") #grayscale
@@ -3316,9 +3317,9 @@ def main():
         else:
             nim = nim - depth
 
-        if printToFile:       
-            print(originalStdout, "Start Gcoge generation")
-            print(originalStdout, "Please wait...")
+        # if printToFile:       
+        #     print(originalStdout, "Start Gcoge generation")
+        #     print(originalStdout, "Please wait...")
       
         if prn_detail > 0: print("(Image max= {0} min={1})".format(nim.max(),nim.min()))
 
